@@ -184,7 +184,7 @@ Useful flags: `--timeout SEC`, `--idle-timeout SEC` (`0` disables), `--no-watch`
 - **Your code leaves your machine.** The spec and every file the worker reads go to the worker's model provider.
   Keep secrets out of specs, and don't delegate code you aren't allowed to send.
 - **Workers run with auto-approved permissions** inside `--cwd`. Point `--cwd` at the project, never at a parent directory that holds unrelated work.
-- The auto-opening watch window is Windows-only. Elsewhere the script prints the `watch.py` command to run in a second terminal.
+- The watch window opens automatically on Windows (new console) and macOS (new Terminal.app window; macOS asks once for Automation permission). Elsewhere, or if that fails, the script prints the `watch.py` command to run in a second terminal.
 - Developed and used daily on Windows 11. macOS/Linux should work but are less exercised.
 - Files in git-ignored locations aren't tracked by change detection.
 

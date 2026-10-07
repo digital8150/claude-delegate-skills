@@ -182,7 +182,7 @@ python ~/.claude/skills/opencode-delegate/scripts/delegate.py --spec spec.md --c
   스펙에 비밀값을 넣지 말고, 외부로 보내면 안 되는 코드는 위임하지 마세요.
 - **작업자는 `--cwd` 안에서 권한 자동 승인 상태로 돕니다.** `--cwd`는 반드시 해당 프로젝트를 가리키게 하고,
   관련 없는 작업이 섞인 상위 폴더를 가리키지 마세요.
-- 감시 창 자동 실행은 Windows 전용입니다. 다른 OS에서는 두 번째 터미널에서 돌릴 `watch.py` 명령을 출력합니다.
+- 감시 창은 Windows(새 콘솔)와 macOS(새 Terminal.app 창, 처음 한 번 자동화 권한을 물음)에서 자동으로 뜹니다. 그 외 OS이거나 창을 못 열면 두 번째 터미널에서 돌릴 `watch.py` 명령을 출력합니다.
 - Windows 11에서 매일 쓰면서 다듬었습니다. macOS/Linux도 동작해야 하지만 덜 검증됐습니다.
 - git이 무시하는 위치의 파일은 변경 감지에 잡히지 않습니다.
 
