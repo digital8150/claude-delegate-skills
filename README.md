@@ -86,6 +86,27 @@ The report prints the session ID and a ready-made resume command whenever a run 
 recognizes the case where the worker *finished* and the error only arrived after its final message, so
 nothing gets resumed needlessly.
 
+### Over-exploration guard: a worker that only reads is stuck, not working
+
+Cheap models given room to "explore" tend to keep reading, often the *source of third-party libraries*,
+instead of committing to a design. One real run spent 30 minutes and 81 of its 117 tool calls inside
+`external/imgui`, edited nothing, and timed out. Resumed with a short note that made the design decisions
+for it, the same session finished in 3 minutes.
+
+So the skills attack it from both ends:
+
+- **Prevention.** Every plan, even a one-paragraph `full` brief, ends with a map: **Start here** (the 3-6 files
+  to read first), **Decided** (the third-party API choices the worker would otherwise research by reading
+  library internals), and **Off limits** (vendored directories). The worker is told to stay out of
+  third-party source, use standard documented usage, and verify by building rather than by reading.
+- **Detection.** If no file has been edited after `--explore-limit` minutes (8 / 12 / 15 for `default` /
+  `high` / `full`), the run stops as `OVER-EXPLORING` and comes back to Claude within minutes instead of at
+  the timeout. There is deliberately **no automatic "hurry up" nudge**, because it can't make the decision
+  the worker is stuck on. Claude reads what the worker kept opening, works out the question behind it,
+  answers it as a decision, and resumes the same session.
+
+The report shows how long it took to reach the first edit and how many tool calls went into third-party code.
+
 ### Evidence, not claims
 
 Every run writes a folder (under the system temp dir, never inside your project):
@@ -177,7 +198,7 @@ You can also run a worker by hand:
 python ~/.claude/skills/opencode-delegate/scripts/delegate.py --spec spec.md --cwd path/to/project
 ```
 
-Useful flags: `--timeout SEC`, `--idle-timeout SEC` (`0` disables), `--no-watch`, `--session ID`, `--model ID`.
+Useful flags: `--timeout SEC`, `--idle-timeout SEC` (`0` disables), `--explore-limit MIN` (`0` disables), `--no-watch`, `--session ID`, `--model ID`.
 
 ## Caveats
 

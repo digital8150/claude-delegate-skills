@@ -39,6 +39,11 @@ Write the spec to a file in the scratchpad/temp directory (not the project):
 - **`--level high`**: big-picture plan only — goal, architecture direction, constraints, files allowed to touch, non-goals, verification command. No signatures or detailed behaviors; the worker designs those. One page max. (Less Claude output at the cost of more worker discretion; review is the same.)
 - **`--level full`**: direction brief only — goal, scope, constraints agreed with the user. Agree the direction with the user in 1–2 quick exchanges, then cut; no deep exploration, no detailed spec. Write the brief (at most half a page) and delegate.
 
+Less detail never means less map. Whatever the level, the plan or brief ends with three short lists, because a cheap worker without a map explores endlessly (one run spent 30 minutes reading `external/imgui` and edited nothing, then finished in 3 minutes once the decisions were made for it):
+- **Start here**: the 3–6 project files to read first: entry points, the file to imitate, where the change lands. You already found them; hand them over.
+- **Decided**: any choice about a third-party API the worker would otherwise research by reading library source (which widget/call/pattern to use, e.g. "use an ImGui table with fixed-width label column"). One line each. These are the decisions a worker cannot make cheaply.
+- **Off limits**: vendored or third-party directories it must not read (`external/`, `third_party/`, `node_modules/` ...).
+
 For large jobs, split into several specs that touch **disjoint files** and run them in parallel in separate background Bash calls. Never split work that shares files; concurrent edits collide. Alternatively run specs in sequence, reviewing and fixing each before the next so errors don't compound.
 
 ### 4. Run the worker
@@ -59,6 +64,8 @@ The script snapshots the project, runs `agy -p` with auto-approved permissions, 
 3. Write a short follow-up note (not a new spec): what interrupted it, decisions on anything it was unsure about (you are the architect; decide), and what not to redo.
 4. Resume the same conversation: `delegate.py --session <ID> --spec <note> --cwd <same project>` with the same `--level`/`--mode`. The session ID is in `report.md` and in the script's printed output, together with a ready-made resume line.
 5. Review the task as a whole afterwards: the resumed run's `changes.patch` covers only what changed after resuming, and the first run's patch covers the rest, so read both.
+
+**Over-exploration guard.** The worker is told to stay out of third-party source and to start editing early. If it still has not edited any file after `--explore-limit` minutes (default 8 / 12 / 15 for `default` / `high` / `full`; `0` disables; never in `--mode investigate`), the script stops it and the run ends as OVER-EXPLORING, so it comes back to you within minutes instead of at the 30-60 minute timeout. Nothing nudges it automatically, on purpose: a worker that keeps reading is stuck on a decision, and "hurry up" doesn't make that decision. You assist it: read what it kept opening in `live.log` (the report counts third-party reads), work out the question behind it ("how do ImGui tables size columns?"), answer it as a decision in a short note (which API, which layout, which approach), and resume the same session with that note. Don't just tell it to hurry. Raise the limit only for tasks that genuinely need a long read before the first edit (a large unfamiliar codebase with no "Start here" you can give).
 
 Resume at most twice per task. If it keeps failing the same way, stop and tell the user what is happening (retry later, change model, or let Claude take over) instead of silently doing the work yourself.
 

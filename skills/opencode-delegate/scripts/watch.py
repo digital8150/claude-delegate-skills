@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 QUIET_WARN, QUIET_ALARM = 120, 300  # seconds without a worker event
-FINISHED = {"done", "failed", "timeout", "stalled"}
+FINISHED = {"done", "failed", "timeout", "stalled", "exploring"}
 COLORS = {"TOOL": "\x1b[36m", "SAY ": "\x1b[0m\x1b[1m", "ERR ": "\x1b[31m", "INFO": "\x1b[90m",
           "DONE": "\x1b[32m", "ok  ": "\x1b[90m"}
 RESET, YELLOW, RED, GREEN, DIM = "\x1b[0m", "\x1b[33m", "\x1b[41;97m", "\x1b[32m", "\x1b[90m"
@@ -62,7 +62,8 @@ def status_bar(st):
     now = time.time()
     elapsed = (st.get("ended") or now) - st["started"]
     quiet = now - st.get("last_event", st["started"])
-    head = f" {st.get('worker', 'worker')} | {mmss(elapsed)} elapsed | {st.get('tools', 0)} tool calls "
+    head = (f" {st.get('worker', 'worker')} | {mmss(elapsed)} elapsed | {st.get('tools', 0)} tool calls, "
+            f"{st.get('edits', 0)} edits ")
     if st["state"] in FINISHED:
         return (GREEN if st["state"] == "done" else RED), f" FINISHED: {st['state']} |{head}"
     idle = st.get("idle_timeout")

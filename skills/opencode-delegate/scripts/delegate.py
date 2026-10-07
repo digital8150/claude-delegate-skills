@@ -64,6 +64,24 @@ MAX_TOTAL_COPY_BYTES = 300_000_000
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
+# Over-exploration guard. Workers left to "explore" tend to keep reading (often the source of
+# third-party libraries) instead of committing to a design: one run spent 30 minutes and 81 of
+# 117 tool calls inside external/imgui, edited nothing, then finished in 3 minutes once Claude
+# made the decisions for it. So: minutes allowed before the first file edit, per --level.
+EXPLORE_LIMIT_MIN = {"default": 8, "high": 12, "full": 15}
+EDIT_TOOL = re.compile(r"edit|write|patch|replace|create|apply", re.I)
+THIRD_PARTY = re.compile(r"[\\/](external|extern|third[_-]?party|3rdparty|vendor|vendored|deps|node_modules|"
+                         r"site-packages|\.cargo|pkg[\\/]mod)[\\/]", re.I)
+EXPLORE_RULES = (
+    " Explore with purpose: read the files the plan points to first, then only what the next decision needs. "
+    "Stay inside this project's own code: do not read the source of third-party libraries or vendored "
+    "dependencies (external/, third_party/, vendor/, node_modules/ ...); how this project already calls them, "
+    "plus their headers, is enough. When unsure how a library behaves, use its standard documented usage, "
+    "note the assumption, and check it by building or running, not by reading its internals. Start editing "
+    "early: if you have not changed any file after roughly {limit} minutes, the run is stopped."
+)
+
+
 def list_files(root: Path):
     """Relative posix paths of files under root. Prefers git (respects .gitignore)."""
     try:
@@ -174,15 +192,17 @@ def write_status(run_dir: Path, status: dict):
         pass  # watcher had it open this instant (Windows); the next tick rewrites it
 
 
-def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, status: dict):
+def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, status: dict,
+             explore_deadline=None):
     """Run the worker, streaming every event to disk the moment it arrives.
 
     events.jsonl gets the raw stream, live.log a readable line per action, status.json a
     heartbeat (watch.py renders these). The worker is killed after `timeout` seconds in
-    total, or after `idle_timeout` seconds with no event at all, which is what a hung
-    worker looks like. Returns (raw_stdout, exit_code, stderr, outcome).
+    total, after `idle_timeout` seconds with no event at all (hung), or, if it has still
+    not edited any file at `explore_deadline` (epoch seconds), as "exploring".
+    Returns (raw_stdout, exit_code, stderr, outcome).
     """
-    events_f = open(run_dir / "events.jsonl", "w", encoding="utf-8")
+    events_f = open(run_dir / "events.jsonl", "a", encoding="utf-8")
     live_f = open(run_dir / "live.log", "a", encoding="utf-8")
     stderr_path = run_dir / "stderr.log"
     chunks = []
@@ -193,7 +213,9 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
         proc = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=stderr_f, text=True, encoding="utf-8", errors="replace",
                                 env={**os.environ, "PWD": str(root)})
-        status.update(state="running", pid=proc.pid, last_event=time.time(), tools=0)
+        status.update(state="running", pid=proc.pid, last_event=time.time())
+        for key in ("tools", "edits", "third_party"):
+            status.setdefault(key, 0)
 
         def pump():
             for line in proc.stdout:
@@ -202,7 +224,13 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
                 events_f.flush()
                 status["last_event"] = time.time()
                 for out in render_event(line):
-                    status["tools"] += out.startswith("TOOL")
+                    if out.startswith("TOOL"):
+                        status["tools"] += 1
+                        if EDIT_TOOL.search(out.split()[1]):
+                            status["edits"] += 1
+                            status.setdefault("first_edit", time.time())
+                        elif THIRD_PARTY.search(out):
+                            status["third_party"] += 1
                     live_f.write(f"[{time.strftime('%H:%M:%S')}] {out}\n")
                 live_f.flush()
 
@@ -215,6 +243,8 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
                 outcome = "timeout"
             elif idle_timeout and now - status["last_event"] > idle_timeout:
                 outcome = "stalled"
+            elif explore_deadline and not status["edits"] and now > explore_deadline:
+                outcome = "exploring"
             if outcome != "done":
                 live_f.write(f"[{time.strftime('%H:%M:%S')}] ERR  killing worker: {outcome}\n")
                 live_f.flush()
@@ -301,6 +331,10 @@ def main():
     ap.add_argument("--session", default=None,
                     help="continue an earlier opencode session (its ID, e.g. from a failed run's events.jsonl) "
                          "instead of starting a new one; the spec file is sent as the follow-up message")
+    ap.add_argument("--explore-limit", type=float, default=None,
+                    help="minutes the worker may read before its first file edit; then it is stopped and "
+                         "handed back so Claude can make the decisions it is stuck on (default: 8/12/15 for "
+                         "default/high/full; 0 disables; never applies to --mode investigate)")
     ap.add_argument("--no-watch", action="store_true",
                     help="don't open the read-only live-view window")
     args = ap.parse_args()
@@ -360,6 +394,12 @@ def main():
         )
     message += (" This run is non-interactive: never use the question tool; nobody can answer. "
                 "Decide open points yourself and note them in your final message.")
+    if args.explore_limit is None:
+        args.explore_limit = EXPLORE_LIMIT_MIN[args.level]
+    if args.mode == "investigate":
+        args.explore_limit = 0  # reading is the whole job
+    if args.explore_limit:
+        message += EXPLORE_RULES.format(limit=f"{args.explore_limit:g}")
     if args.timeout is None:
         args.timeout = {"default": 1800, "high": 3600, "full": 3600}[args.level]
     args.model = resolve_model(args.model)
@@ -374,15 +414,24 @@ def main():
     if not args.no_watch:
         open_watch_window(run_dir)
 
-    raw, exit_code, stderr, outcome = run_live(cmd, root, run_dir, args.timeout, args.idle_timeout, status)
+    limit_s = args.explore_limit * 60
+    raw, exit_code, stderr, outcome = run_live(
+        cmd, root, run_dir, args.timeout, args.idle_timeout, status,
+        explore_deadline=status["started"] + limit_s if limit_s else None)
+    # No automatic nudge on "exploring": a generic "hurry up" can't make the decision the worker
+    # is stuck on. Stop early and hand back to Claude, who writes a decision note and resumes.
+    found = re.search(r'"sessionID"\s*:\s*"([^"]+)"', raw)
     timed_out = outcome == "timeout"
     elapsed = time.time() - status["started"]
 
     final, tool_calls, tokens, errors = parse_events(raw)
-    found = re.search(r'"sessionID"\s*:\s*"([^"]+)"', raw)
     session = found.group(1) if found else args.session
     resume_hint = (f"resume: if the worker was cut off (API/session error, timeout, stall, crash) rather than done, "
                    f"continue it with --session {session} --spec <follow-up note> --cwd \"{root}\"")
+    if outcome == "exploring":
+        resume_hint = (f"resume: the worker kept reading instead of deciding. Look at what it was reading in "
+                       f"live.log, make those decisions yourself in a short note (which API, which layout, "
+                       f"which approach), then --session {session} --spec <note> --cwd \"{root}\"")
     (run_dir / "final.md").write_text(final or "(no final message)", encoding="utf-8")
 
     after = stat_map(root)
@@ -420,8 +469,12 @@ def main():
         f"- model: {model_label}, session: {session}" + (f" (resumed {args.session})" if args.session else ""),
         f"- cwd: {root}",
         f"- exit code: {exit_code}{' (TIMED OUT)' if timed_out else ''}"
-        + (f" (STALLED: no worker output for {args.idle_timeout}s, killed)" if outcome == "stalled" else ""),
+        + (f" (STALLED: no worker output for {args.idle_timeout}s, killed)" if outcome == "stalled" else "")
+        + (f" (OVER-EXPLORING: no file edited within {args.explore_limit:g} min, stopped)" if outcome == "exploring" else ""),
         f"- elapsed: {elapsed:.0f}s, tool calls: {tool_calls}, tokens: {tokens}",
+        "- exploration: first edit "
+        + (f"after {status['first_edit'] - status['started']:.0f}s" if status.get("first_edit") else "never")
+        + f", third-party/vendored reads: {status.get('third_party', 0)} of {status.get('tools', 0)} tool calls",
         f"- modified ({len(modified)}): {', '.join(modified) or '-'}",
         f"- added ({len(added)}): {', '.join(added) or '-'}",
         f"- deleted ({len(deleted)}): {', '.join(deleted) or '-'}",
@@ -441,11 +494,11 @@ def main():
               f"Full diff: {run_dir / 'changes.patch'}"]
     (run_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
     status.update(state=outcome if outcome != "done" else ("done" if ok else "failed"),
-                  ended=time.time(), summary=lines[2:9])
+                  ended=time.time(), summary=lines[2:10])
     write_status(run_dir, status)
 
     print(f"run folder: {run_dir}")
-    print("\n".join(lines[2:9]))
+    print("\n".join(lines[2:10]))
     print(f"session: {session}")
     if not ok and session:
         print(resume_hint)
