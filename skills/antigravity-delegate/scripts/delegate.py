@@ -374,7 +374,7 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
 
 
 def open_watch_window(run_dir: Path):
-    """Pop up a separate read-only console tailing this run (Windows). Elsewhere, print how to."""
+    """Pop up a separate read-only console tailing this run (Windows, macOS). Elsewhere, print how to."""
     watch = Path(__file__).with_name("watch.py")
     if os.name == "nt":
         try:
@@ -382,6 +382,17 @@ def open_watch_window(run_dir: Path):
                              creationflags=subprocess.CREATE_NEW_CONSOLE)
             return
         except OSError:
+            pass
+    elif sys.platform == "darwin":
+        # Terminal.app window via AppleScript; first use asks for Automation permission.
+        import shlex
+        shell_cmd = " ".join(shlex.quote(a) for a in [sys.executable, str(watch), str(run_dir), "--hold"])
+        script = f'tell application "Terminal" to do script "{shell_cmd}"'
+        try:
+            r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
             pass
     print(f"watch live: python \"{watch}\" \"{run_dir}\"", flush=True)
 
