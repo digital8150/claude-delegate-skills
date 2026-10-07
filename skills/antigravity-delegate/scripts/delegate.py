@@ -528,6 +528,11 @@ def main():
               "started": time.time(), "timeout": args.timeout, "idle_timeout": args.idle_timeout}
     write_status(run_dir, status)
     print(f"run folder: {run_dir}\nlive log: {run_dir / 'live.log'}", flush=True)
+    # Head of live.log: exactly what Claude handed the worker, so the watch window opens on it.
+    with open(run_dir / "live.log", "a", encoding="utf-8") as f:
+        f.write(f"[{time.strftime('%H:%M:%S')}] INFO request sent to the worker:\n{worker_message.strip()}\n\n"
+                f"[{time.strftime('%H:%M:%S')}] INFO spec ({spec}):\n"
+                f"{spec_copy.read_text(encoding='utf-8', errors='replace').strip()}\n\n")
     if not args.no_watch:
         open_watch_window(run_dir)
 

@@ -347,9 +347,18 @@ def main():
     if not oc:
         sys.exit("opencode not found on PATH")
 
-    run_dir = Path(tempfile.gettempdir()) / "opencode-delegate" / time.strftime("%Y%m%d-%H%M%S")
+    # Unique per run: two workers launched in the same second used to share one folder (mixed logs / reports).
+    base_dir = Path(tempfile.gettempdir()) / "opencode-delegate"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = base_dir / stamp
+    for n in range(2, 100):
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            run_dir = base_dir / f"{stamp}-{n}"
     before_dir = run_dir / "before"
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     before = stat_map(root)
     skipped = backup(root, before, before_dir)
@@ -411,6 +420,11 @@ def main():
               "started": time.time(), "timeout": args.timeout, "idle_timeout": args.idle_timeout}
     write_status(run_dir, status)
     print(f"run folder: {run_dir}\nlive log: {run_dir / 'live.log'}", flush=True)
+    # Head of live.log: exactly what Claude handed the worker, so the watch window opens on it.
+    with open(run_dir / "live.log", "a", encoding="utf-8") as f:
+        f.write(f"[{time.strftime('%H:%M:%S')}] INFO request sent to the worker:\n{message}\n\n"
+                f"[{time.strftime('%H:%M:%S')}] INFO attached spec ({spec}):\n"
+                f"{spec.read_text(encoding='utf-8', errors='replace').strip()}\n\n")
     if not args.no_watch:
         open_watch_window(run_dir)
 
