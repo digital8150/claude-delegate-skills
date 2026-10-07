@@ -243,10 +243,12 @@ def open_watch_window(run_dir: Path):
     elif sys.platform == "darwin":
         # Terminal.app window via AppleScript; first use asks for Automation permission.
         import shlex
+        # The command goes in as argv, never spliced into the AppleScript source.
         shell_cmd = " ".join(shlex.quote(a) for a in [sys.executable, str(watch), str(run_dir), "--hold"])
-        script = f'tell application "Terminal" to do script "{shell_cmd}"'
+        script = 'on run argv\ntell application "Terminal" to do script (item 1 of argv)\nend run'
         try:
-            r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15)
+            r = subprocess.run(["/usr/bin/osascript", "-e", script, shell_cmd],
+                               capture_output=True, timeout=15)
             if r.returncode == 0:
                 return
         except (OSError, subprocess.SubprocessError):
