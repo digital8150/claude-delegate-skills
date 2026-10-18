@@ -3,6 +3,7 @@
 
 Usage:
   python delegate.py --spec SPEC.md [--cwd DIR] [--model MODEL#variant] [--timeout SEC]
+  python delegate.py --stop [RUN_DIR|SESSION_ID] [--delete]   # formal stop (session interrupt)
 
 What it does:
   1. Snapshots the files under --cwd (copies small text files so real diffs are possible).
@@ -29,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -183,6 +185,55 @@ def kill_tree(proc):
         proc.kill()
 
 
+def oc_api(oc, op, **params):
+    """Call one opencode server operation (`opencode api <op> --param k=v`); parsed JSON or None."""
+    cmd = [oc, "api", op] + [x for k, v in params.items() for x in ("--param", f"{k}={v}")]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=30, stdin=subprocess.DEVNULL)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def interrupt_session(oc, sid):
+    """Formal interrupt (the TUI's Esc). True: it was running and is now stopped; False: it was
+    already idle; None: the server could not be asked.
+
+    Killing the `opencode run` client is NOT a stop: the session lives in the background server and
+    keeps editing files. This call ends the session's active execution while keeping the session
+    resumable (unlike `opencode session delete`).
+    """
+    r = oc_api(oc, "session.interrupt", sessionID=sid)
+    return r.get("interrupted") if isinstance(r, dict) and "interrupted" in r else None
+
+
+def sessions_since(oc, root: Path, started):
+    """Sessions in `root` created since `started`: for a worker stopped before its first event
+    told us its session ID."""
+    r = oc_api(oc, "session.list")
+    want = os.path.normcase(str(root))
+    return [s["id"] for s in (r or {}).get("data", [])
+            if os.path.normcase(s.get("location", {}).get("directory", "")) == want
+            and s.get("time", {}).get("created", 0) / 1000 >= started - 5]
+
+
+def stop_worker(proc, oc, sid, root: Path, started):
+    """Stop a worker properly: interrupt its session on the server first, let the client exit by
+    itself, and only then (last resort) kill the client process. Returns "interrupted" | "idle" |
+    "unconfirmed" (server unreachable: the session may still be running)."""
+    sids = [sid] if sid else sessions_since(oc, root, started)
+    results = [interrupt_session(oc, x) for x in sids]
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        results += [interrupt_session(oc, x) for x in sids]  # the client may have raced a new step
+    if True in results:
+        return "interrupted"
+    return "idle" if results and all(r is False for r in results) else "unconfirmed"
+
+
 def write_status(run_dir: Path, status: dict):
     tmp = run_dir / "status.json.tmp"
     tmp.write_text(json.dumps(status), encoding="utf-8")
@@ -193,13 +244,15 @@ def write_status(run_dir: Path, status: dict):
 
 
 def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, status: dict,
-             explore_deadline=None):
+             explore_deadline=None, oc=None):
     """Run the worker, streaming every event to disk the moment it arrives.
 
     events.jsonl gets the raw stream, live.log a readable line per action, status.json a
     heartbeat (watch.py renders these). The worker is killed after `timeout` seconds in
     total, after `idle_timeout` seconds with no event at all (hung), or, if it has still
-    not edited any file at `explore_deadline` (epoch seconds), as "exploring".
+    not edited any file at `explore_deadline` (epoch seconds), as "exploring". A stop request
+    (`delegate.py --stop`, a `stop.request` file in the run folder, SIGINT/SIGTERM to this script)
+    ends it as "stopped". Every kill goes through stop_worker: interrupt the server session first.
     Returns (raw_stdout, exit_code, stderr, outcome).
     """
     events_f = open(run_dir / "events.jsonl", "a", encoding="utf-8")
@@ -213,12 +266,17 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
         proc = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=stderr_f, text=True, encoding="utf-8", errors="replace",
                                 env={**os.environ, "PWD": str(root)})
-        status.update(state="running", pid=proc.pid, last_event=time.time())
+        status.update(state="running", pid=proc.pid, last_event=time.time(), delegate_pid=os.getpid())
         for key in ("tools", "edits", "third_party"):
             status.setdefault(key, 0)
 
         def pump():
             for line in proc.stdout:
+                if not status.get("session"):
+                    m = re.search(r'"sessionID"\s*:\s*"([^"]+)"', line)
+                    if m:
+                        status["session"] = m.group(1)  # lets --stop find the session while it runs
+                        write_status(run_dir, status)
                 chunks.append(line)
                 events_f.write(line)
                 events_f.flush()
@@ -237,19 +295,36 @@ def run_live(cmd, root: Path, run_dir: Path, timeout: int, idle_timeout: int, st
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()
         outcome = "done"
+        stop_flag = threading.Event()
+
+        def on_signal(signum, frame):
+            stop_flag.set()
+
+        # Claude's TaskStop / Ctrl-C reach this script, not the worker: turn them into a real stop.
+        for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            if hasattr(signal, name):
+                try:
+                    signal.signal(getattr(signal, name), on_signal)
+                except (ValueError, OSError):
+                    pass
         while proc.poll() is None:
             now = time.time()
-            if now - status["started"] > timeout:
+            if stop_flag.is_set() or (run_dir / "stop.request").exists():
+                outcome = "stopped"
+            elif now - status["started"] > timeout:
                 outcome = "timeout"
             elif idle_timeout and now - status["last_event"] > idle_timeout:
                 outcome = "stalled"
             elif explore_deadline and not status["edits"] and now > explore_deadline:
                 outcome = "exploring"
             if outcome != "done":
-                live_f.write(f"[{time.strftime('%H:%M:%S')}] ERR  killing worker: {outcome}\n")
+                live_f.write(f"[{time.strftime('%H:%M:%S')}] ERR  stopping worker: {outcome}\n")
                 live_f.flush()
-                kill_tree(proc)
+                status["interrupt"] = stop_worker(proc, oc, status.get("session"), root, status["started"])
+                live_f.write(f"[{time.strftime('%H:%M:%S')}] INFO session interrupt: {status['interrupt']}\n")
+                live_f.flush()
                 break
+            status["heartbeat"] = now
             write_status(run_dir, status)
             time.sleep(1)
         proc.wait()
@@ -286,7 +361,7 @@ def open_watch_window(run_dir: Path):
     print(f"watch live: python \"{watch}\" \"{run_dir}\"", flush=True)
 
 
-def parse_events(raw: str):
+def parse_events(raw: str, outcome="done"):
     texts, tools, tokens, errors = [], 0, None, []
     for line in raw.splitlines():
         line = line.strip()
@@ -305,13 +380,65 @@ def parse_events(raw: str):
         elif kind == "step_finish":
             tokens = part.get("tokens", tokens)
         elif kind == "error":
-            errors.append(json.dumps(ev.get("error", ev))[:500])
+            err = ev.get("error", ev)
+            if outcome != "done" and isinstance(err, dict) and err.get("type") == "aborted":
+                continue  # our own interrupt echoing back, not a worker failure
+            errors.append(json.dumps(err)[:500])
     return "".join(texts).strip(), tools, tokens, errors
+
+
+def newest_run_dir():
+    base = Path(tempfile.gettempdir()) / "opencode-delegate"
+    runs = [d for d in base.glob("*") if (d / "status.json").is_file()]
+    return max(runs, key=lambda d: (d / "status.json").stat().st_mtime, default=None)
+
+
+def stop_command(target, delete, oc):
+    """`--stop [RUN_DIR|SESSION_ID]`: the formal way to end a worker (the user took the task back,
+    or Claude decided to). Interrupts the session on the opencode server; killing the client
+    process alone leaves the session running in the background and still editing files."""
+    sid, run_dir = None, None
+    if target and target.startswith("ses_"):
+        sid = target
+    else:
+        run_dir = Path(target) if target else newest_run_dir()
+        if not run_dir or not (run_dir / "status.json").is_file():
+            sys.exit("no run folder found; pass a run folder or a session id (ses_...)")
+        st = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+        sid = st.get("session")
+        # A live delegate.py (heartbeat within 5s) owns the run: ask it to stop, so report.md,
+        # changes.patch and status.json get written as usual.
+        if st.get("state") == "running" and time.time() - st.get("heartbeat", 0) < 5:
+            (run_dir / "stop.request").write_text("stop", encoding="utf-8")
+            for _ in range(60):
+                time.sleep(1)
+                st = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+                if st.get("state") != "running":
+                    break
+            print(f"run {run_dir.name}: {st.get('state')}, session interrupt: {st.get('interrupt')}")
+    if sid:
+        # Idempotent: False just means "already idle", which is the state we want.
+        r = interrupt_session(oc, sid)
+        print(f"session {sid}: " + {True: "interrupted", False: "idle (nothing running)",
+                                      None: "UNCONFIRMED: opencode server unreachable"}[r])
+        if delete:
+            out = subprocess.run([oc, "session", "delete", sid], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+            print(f"session delete: {(out.stdout or out.stderr).strip() or out.returncode}")
+    else:
+        print("no session id recorded yet: the worker had not emitted an event. Run: "
+              "opencode api session.list, then --stop <ses_id>")
+    print("next: check for stray writes before editing its files: find <project> -mmin -2 -type f")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--spec", required=True, help="markdown spec/plan/brief file for the worker")
+    ap.add_argument("--spec", default=None, help="markdown spec/plan/brief file for the worker")
+    ap.add_argument("--stop", nargs="?", const="", default=None, metavar="RUN_DIR|SESSION_ID",
+                    help="stop a running worker the formal way (session interrupt on the opencode server) "
+                         "instead of starting one; no value = the newest run. Add --delete to also delete "
+                         "the session (no resume afterwards)")
+    ap.add_argument("--delete", action="store_true", help="with --stop: also `opencode session delete` it")
     ap.add_argument("--cwd", default=".", help="project directory the worker runs in")
     ap.add_argument("--model", default=None,
                     help=f"provider/model#variant (see `opencode models`); default: ${MODEL_ENV}, "
@@ -339,6 +466,13 @@ def main():
                     help="don't open the read-only live-view window")
     args = ap.parse_args()
 
+    if args.stop is not None:
+        oc = shutil.which("opencode")
+        if not oc:
+            sys.exit("opencode not found on PATH")
+        return stop_command(args.stop, args.delete, oc)
+    if not args.spec:
+        ap.error("--spec is required (unless --stop)")
     root = Path(args.cwd).resolve()
     spec = Path(args.spec).resolve()
     if not spec.is_file():
@@ -431,17 +565,21 @@ def main():
     limit_s = args.explore_limit * 60
     raw, exit_code, stderr, outcome = run_live(
         cmd, root, run_dir, args.timeout, args.idle_timeout, status,
-        explore_deadline=status["started"] + limit_s if limit_s else None)
+        explore_deadline=status["started"] + limit_s if limit_s else None, oc=oc)
     # No automatic nudge on "exploring": a generic "hurry up" can't make the decision the worker
     # is stuck on. Stop early and hand back to Claude, who writes a decision note and resumes.
     found = re.search(r'"sessionID"\s*:\s*"([^"]+)"', raw)
     timed_out = outcome == "timeout"
     elapsed = time.time() - status["started"]
 
-    final, tool_calls, tokens, errors = parse_events(raw)
+    final, tool_calls, tokens, errors = parse_events(raw, outcome)
     session = found.group(1) if found else args.session
     resume_hint = (f"resume: if the worker was cut off (API/session error, timeout, stall, crash) rather than done, "
                    f"continue it with --session {session} --spec <follow-up note> --cwd \"{root}\"")
+    if outcome == "stopped":
+        resume_hint = (f"stopped on request (session interrupt: {status.get('interrupt')}); the session is kept. "
+                       f"Do not resume unless the user wants the worker to continue: --session {session} "
+                       f"--spec <note> --cwd \"{root}\". To drop it for good: --stop {session} --delete")
     if outcome == "exploring":
         resume_hint = (f"resume: the worker kept reading instead of deciding. Look at what it was reading in "
                        f"live.log, make those decisions yourself in a short note (which API, which layout, "
@@ -484,6 +622,7 @@ def main():
         f"- cwd: {root}",
         f"- exit code: {exit_code}{' (TIMED OUT)' if timed_out else ''}"
         + (f" (STALLED: no worker output for {args.idle_timeout}s, killed)" if outcome == "stalled" else "")
+        + (f" (STOPPED on request; session interrupt: {status.get('interrupt')})" if outcome == "stopped" else "")
         + (f" (OVER-EXPLORING: no file edited within {args.explore_limit:g} min, stopped)" if outcome == "exploring" else ""),
         f"- elapsed: {elapsed:.0f}s, tool calls: {tool_calls}, tokens: {tokens}",
         "- exploration: first edit "

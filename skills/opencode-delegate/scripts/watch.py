@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 QUIET_WARN, QUIET_ALARM = 120, 300  # seconds without a worker event
-FINISHED = {"done", "failed", "timeout", "stalled", "exploring"}
+FINISHED = {"done", "failed", "timeout", "stalled", "exploring", "stopped"}
 COLORS = {"TOOL": "\x1b[36m", "SAY ": "\x1b[0m\x1b[1m", "ERR ": "\x1b[31m", "INFO": "\x1b[90m",
           "DONE": "\x1b[32m", "ok  ": "\x1b[90m"}
 RESET, YELLOW, RED, GREEN, DIM = "\x1b[0m", "\x1b[33m", "\x1b[41;97m", "\x1b[32m", "\x1b[90m"
