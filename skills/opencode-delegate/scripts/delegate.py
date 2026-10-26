@@ -70,7 +70,9 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # third-party libraries) instead of committing to a design: one run spent 30 minutes and 81 of
 # 117 tool calls inside external/imgui, edited nothing, then finished in 3 minutes once Claude
 # made the decisions for it. So: minutes allowed before the first file edit, per --level.
-EXPLORE_LIMIT_MIN = {"default": 8, "high": 12, "full": 15}
+# The guard is OFF by default (user decision 2026-10-27): Claude inspects the run every 15 minutes instead and
+# intervenes itself (SKILL.md "Inspection"). --explore-limit N still turns it on for one run.
+EXPLORE_LIMIT_MIN = {"default": 0, "high": 0, "full": 0}
 EDIT_TOOL = re.compile(r"edit|write|patch|replace|create|apply", re.I)
 THIRD_PARTY = re.compile(r"[\\/](external|extern|third[_-]?party|3rdparty|vendor|vendored|deps|node_modules|"
                          r"site-packages|\.cargo|pkg[\\/]mod)[\\/]", re.I)
@@ -80,8 +82,9 @@ EXPLORE_RULES = (
     "dependencies (external/, third_party/, vendor/, node_modules/ ...); how this project already calls them, "
     "plus their headers, is enough. When unsure how a library behaves, use its standard documented usage, "
     "note the assumption, and check it by building or running, not by reading its internals. Start editing "
-    "early: if you have not changed any file after roughly {limit} minutes, the run is stopped."
+    "early: the plan's Start here / Decided lists are meant to make long reading unnecessary."
 )
+EXPLORE_STOP = " If you have not changed any file after roughly {limit} minutes, the run is stopped."
 
 
 def list_files(root: Path):
@@ -452,16 +455,16 @@ def main():
                     help="implement: worker builds (default). investigate: read-only; worker explores "
                          "the codebase and reports findings/root causes instead of changing files")
     ap.add_argument("--timeout", type=int, default=None,
-                    help="seconds before the worker is killed (default: 1800, or 3600 for high/full)")
+                    help="seconds before the worker is killed (default: 3600)")
     ap.add_argument("--idle-timeout", type=int, default=600,
                     help="kill the worker after this many seconds with no event at all (hung); 0 disables")
     ap.add_argument("--session", default=None,
                     help="continue an earlier opencode session (its ID, e.g. from a failed run's events.jsonl) "
                          "instead of starting a new one; the spec file is sent as the follow-up message")
     ap.add_argument("--explore-limit", type=float, default=None,
-                    help="minutes the worker may read before its first file edit; then it is stopped and "
-                         "handed back so Claude can make the decisions it is stuck on (default: 8/12/15 for "
-                         "default/high/full; 0 disables; never applies to --mode investigate)")
+                    help="opt-in: minutes the worker may read before its first file edit; then it is stopped "
+                         "(default 0 = off: Claude inspects every 15 minutes instead, see SKILL.md; never "
+                         "applies to --mode investigate)")
     ap.add_argument("--no-watch", action="store_true",
                     help="don't open the read-only live-view window")
     args = ap.parse_args()
@@ -541,10 +544,12 @@ def main():
         args.explore_limit = EXPLORE_LIMIT_MIN[args.level]
     if args.mode == "investigate":
         args.explore_limit = 0  # reading is the whole job
+    if args.mode != "investigate":
+        message += EXPLORE_RULES
     if args.explore_limit:
-        message += EXPLORE_RULES.format(limit=f"{args.explore_limit:g}")
+        message += EXPLORE_STOP.format(limit=f"{args.explore_limit:g}")
     if args.timeout is None:
-        args.timeout = {"default": 1800, "high": 3600, "full": 3600}[args.level]
+        args.timeout = 3600   # 60 minutes for every level (user decision 2026-10-27); Claude inspects every 15
     args.model = resolve_model(args.model)
     cmd = [oc, "run"] + (["-m", args.model] if args.model else []) + ["--auto", "--format", "json"]
     model_label = args.model or "opencode default model"

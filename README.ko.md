@@ -44,7 +44,7 @@ flowchart LR
 | 스킬 | 작업자 | 강점 |
 |---|---|---|
 | [`opencode-delegate`](skills/opencode-delegate) | `opencode` CLI로 돌리는 아무 모델 (GLM, Qwen, DeepSeek 등) | 백엔드, 스크립트, 리팩터링, 테스트, 포팅. 싸고 빠릅니다. |
-| [`antigravity-delegate`](skills/antigravity-delegate) | Antigravity `agy` CLI의 최신 Gemini (자동 선택) | 위와 같고 UI 작업도 됩니다. 작업자가 이미지를 볼 수 있고, 가짜 버튼 검사 도구가 포함돼 있습니다. |
+| [`antigravity-delegate`](skills/antigravity-delegate) | Antigravity `agy` CLI의 Gemini Flash (자동 선택, flash 우선) | 위와 같고 UI 작업도 됩니다. 작업자가 이미지를 볼 수 있고, 가짜 버튼 검사 도구가 포함돼 있습니다. |
 
 두 스킬은 작업 흐름, 플래그, 실행 폴더 형식, 실시간 보기가 모두 같습니다.
 
@@ -84,7 +84,7 @@ python delegate.py --session <리포트의-ID> --spec followup.md --cwd <프로�
 비정상 종료 시 리포트에 세션 ID와 바로 쓸 수 있는 이어가기 명령이 출력됩니다. 작업자가 최종 메시지까지 다
 보낸 *뒤에* 에러가 난 경우는 따로 알아보고 표시해서, 괜히 이어가기를 하지 않습니다.
 
-### 과탐색 가드: 읽기만 하는 작업자는 일하는 게 아니라 막힌 것
+### 15분마다 점검: 읽기만 하는 작업자는 일하는 게 아니라 막힌 것
 
 저렴한 모델은 "알아서 탐색하라"는 여지를 주면 설계를 정하지 못하고 계속 읽기만 하는 경향이 있습니다. 특히
 *서드파티 라이브러리 소스*를 많이 읽습니다. 실제 사례로, 한 실행은 30분 동안 도구 호출 117번 중 81번을
@@ -94,13 +94,17 @@ python delegate.py --session <리포트의-ID> --spec followup.md --cwd <프로�
 그래서 양쪽에서 막습니다.
 
 - **예방.** 모든 계획서는 한 문단짜리 `full` 브리프라도 지도로 끝납니다. **Start here**(먼저 읽을 파일
-  3~6개), **Decided**(작업자가 라이브러리 내부를 뒤져서 알아내려 할 서드파티 API 선택), **Off limits**(벤더
-  폴더)입니다. 작업자에게는 서드파티 소스를 읽지 말고, 표준 사용법을 쓰고, 읽기 대신 빌드로 확인하라고 지시합니다.
-- **감지.** `--explore-limit`분(`default` / `high` / `full` 기준 8 / 12 / 15분) 안에 파일을 하나도 고치지
-  않으면 `OVER-EXPLORING`으로 멈추고, 타임아웃을 기다리지 않고 몇 분 만에 Claude에게 돌아옵니다. 일부러
-  **자동 재촉은 넣지 않았습니다.** "서둘러"라는 말로는 작업자가 막힌 결정을 대신 내려줄 수 없기 때문입니다.
-  대신 Claude가 작업자가 계속 열어본 파일을 보고 그 뒤에 숨은 질문을 파악합니다. 그 질문에 대한 결정을 메모로
-  써서 같은 세션을 이어갑니다.
+  3~6개), **Decided**(작업자가 혼자 알아내려 할 결정: 서드파티 API, 수식, 부호·단위 규칙, 데이터 배치),
+  **Off limits**(벤더 폴더), 그리고 여러 파일에 걸친 작업이면 번호를 매긴 **편집 순서**(파일, 추가할 내용,
+  따라 할 기존 코드 줄)입니다. 작업자에게는 서드파티 소스를 읽지 말고, 표준 사용법을 쓰고, 읽기 대신 빌드로
+  확인하라고 지시합니다.
+- **점검.** Claude가 실행 중인 작업자를 멈추지 않고 15분마다 직접 확인합니다. `live.log` 끝부분,
+  `status.json`, 프로젝트에서 바뀐 파일을 봅니다. 계획한 파일을 고치거나 빌드·테스트 중이면 그대로 둡니다.
+  방황 중이면(아직 수정이 없음, 계획에 없는 파일이나 라이브러리 소스를 읽음, 같은 파일을 다시 읽음, 결정을
+  조사함, 캡처를 반복함) **첫 점검에서 바로** 개입합니다. 작업자를 멈추고, 계속 열어본 파일 뒤의 질문을
+  파악해 결정과 편집 순서를 메모로 써서 같은 세션을 이어갑니다. 일부러 **자동 재촉은 넣지 않았습니다.**
+  "서둘러"라는 말로는 작업자가 막힌 결정을 대신 내려줄 수 없기 때문입니다. 예전의 자동 중단
+  (`--explore-limit`)은 기본으로 꺼져 있고, 필요할 때만 켜는 옵션으로 남아 있습니다.
 
 리포트에는 첫 수정까지 걸린 시간과, 도구 호출 중 서드파티 코드에 쓴 횟수가 표시됩니다.
 
@@ -165,7 +169,8 @@ Copy-Item -Recurse claude-delegate-skills\skills\* $HOME\.claude\skills\
 3. `~/.claude/skills/<스킬>/config.json`의 `"model"` (`config.example.json`을 복사해서 시작)
 4. 기본값
    - **opencode**: `-m`을 넘기지 않으므로 본인 opencode 설정의 기본 모델을 씁니다.
-   - **antigravity**: `agy models`에서 `-high` 단계의 최신 Gemini를 자동으로 고릅니다.
+   - **antigravity**: `agy models`에서 자동으로 고릅니다. **flash** 계열을 먼저(다른 계열, 예를 들어 argon의
+     버전이 더 높아도), 그다음 가장 새 flash 버전을, `-high` 단계로 고릅니다 (현재 `gemini-3.8-flash-high`).
 
 ```jsonc
 // ~/.claude/skills/opencode-delegate/config.json
@@ -194,7 +199,7 @@ Claude가 위임할 만한 작업인지 판단하고, 스펙을 쓰고, 작업�
 python ~/.claude/skills/opencode-delegate/scripts/delegate.py --spec spec.md --cwd path/to/project
 ```
 
-유용한 플래그: `--timeout 초`, `--idle-timeout 초` (`0`이면 끔), `--explore-limit 분` (`0`이면 끔), `--no-watch`, `--session ID`, `--model ID`.
+유용한 플래그: `--timeout 초`, `--idle-timeout 초` (`0`이면 끔), `--explore-limit 분` (기본 꺼짐, 켤 때만 지정), `--no-watch`, `--session ID`, `--model ID`.
 
 ## 주의사항
 

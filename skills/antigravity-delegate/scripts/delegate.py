@@ -46,9 +46,10 @@ FALLBACK_MODEL = "gemini-3.8-flash-high"  # used only if `agy models` cannot be 
 
 
 def latest_gemini_model(agy: str) -> str:
-    """Pick the highest-versioned gemini model from `agy models`, preferring the -high effort tier.
-
-    Version is compared numerically (3.10 > 3.9). On a version tie, pro beats flash.
+    """Pick a gemini model from `agy models`: the FLASH family first (user rule 2026-10-27: flash over
+    argon / pro), then the highest version (compared numerically, 3.10 > 3.9), then the -high effort tier.
+    Today this picks gemini-3.8-flash-high even though gemini-4-argon-* is listed. Non-flash families are
+    used only when no flash model is listed.
     """
     try:
         out = subprocess.run([agy, "models"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
@@ -61,7 +62,7 @@ def latest_gemini_model(agy: str) -> str:
         if not m:
             continue
         ver = tuple(int(x) for x in m.group(2).split("."))
-        key = (ver, m.group(4) == "high", m.group(3) == "pro")
+        key = (m.group(3) == "flash", ver, m.group(4) == "high")
         if best_key is None or key > best_key:
             best, best_key = m.group(1), key
     return best or FALLBACK_MODEL
@@ -158,13 +159,16 @@ This run is non-interactive: nobody can answer questions or permission prompts, 
 # third-party libraries) instead of committing to a design: one run spent 30 minutes and 81 of
 # 117 tool calls inside external/imgui, edited nothing, then finished in 3 minutes once Claude
 # made the decisions for it. So: minutes allowed before the first file edit, per --level.
-EXPLORE_LIMIT_MIN = {"default": 8, "high": 12, "full": 15}
+# The guard is OFF by default (user decision 2026-10-27): Claude inspects the run every 15 minutes instead and
+# intervenes itself (SKILL.md "Inspection"). --explore-limit N still turns it on for one run.
+EXPLORE_LIMIT_MIN = {"default": 0, "high": 0, "full": 0}
 EDIT_TOOL = re.compile(r"edit|write|patch|replace|create|apply", re.I)
 THIRD_PARTY = re.compile(r"[\\/](external|extern|third[_-]?party|3rdparty|vendor|vendored|deps|node_modules|"
                          r"site-packages|\.cargo|pkg[\\/]mod)[\\/]", re.I)
 EXPLORE_RULES = """
-Explore with purpose: read the files the plan points to first, then only what the next decision needs. Stay inside this project's own code: do not read the source of third-party libraries or vendored dependencies (external/, third_party/, vendor/, node_modules/ ...); how this project already calls them, plus their headers, is enough. When unsure how a library behaves, use its standard documented usage, note the assumption, and check it by building or running, not by reading its internals. Start editing early: if you have not changed any file after roughly {limit} minutes, the run is stopped.
+Explore with purpose: read the files the plan points to first, then only what the next decision needs. Stay inside this project's own code: do not read the source of third-party libraries or vendored dependencies (external/, third_party/, vendor/, node_modules/ ...); how this project already calls them, plus their headers, is enough. When unsure how a library behaves, use its standard documented usage, note the assumption, and check it by building or running, not by reading its internals. Start editing early: the plan's Start here / Decided lists are meant to make long reading unnecessary.
 """
+EXPLORE_STOP = "If you have not changed any file after roughly {limit} minutes, the run is stopped.\n"
 
 
 def list_files(root: Path):
@@ -442,7 +446,7 @@ def main():
     ap.add_argument("--spec", required=True, help="markdown spec/plan/brief file for the worker")
     ap.add_argument("--cwd", default=".", help="project directory the worker runs in")
     ap.add_argument("--model", default=None,
-                    help="see `agy models`; default: highest-versioned gemini model (-high), auto-detected")
+                    help="see `agy models`; default: auto-detected, flash family first, then the highest version, -high tier")
     ap.add_argument("--level", choices=["default", "high", "full"], default="default",
                     help="spec detail: default=contract spec, high=big-picture plan, full=direction brief")
     ap.add_argument("--review", choices=["full", "smoke", "none"], default="full",
@@ -452,7 +456,7 @@ def main():
                     help="implement: worker builds (default). investigate: read-only; worker explores "
                          "the codebase and reports findings/root causes instead of changing files")
     ap.add_argument("--timeout", type=int, default=None,
-                    help="seconds before the worker is killed (default: 1800, or 3600 for high/full)")
+                    help="seconds before the worker is killed (default: 3600)")
     ap.add_argument("--idle-timeout", type=int, default=600,
                     help="kill the worker after this many seconds with no event at all (hung); 0 disables")
     ap.add_argument("--session", default=None,
@@ -496,7 +500,7 @@ def main():
     skipped = backup(root, before, before_dir)
 
     if args.timeout is None:
-        args.timeout = {"default": 1800, "high": 3600, "full": 3600}[args.level]
+        args.timeout = 3600   # 60 minutes for every level (user decision 2026-10-27); Claude inspects every 15
     if args.level == "high":
         worker_message = WORKER_MESSAGE_HIGH
     elif args.level == "full":
@@ -515,8 +519,10 @@ def main():
         args.explore_limit = EXPLORE_LIMIT_MIN[args.level]
     if args.mode == "investigate":
         args.explore_limit = 0  # reading is the whole job
+    if args.mode != "investigate":
+        worker_message += EXPLORE_RULES
     if args.explore_limit:
-        worker_message += EXPLORE_RULES.format(limit=f"{args.explore_limit:g}")
+        worker_message += EXPLORE_STOP.format(limit=f"{args.explore_limit:g}")
 
     cmd = [agy, "-p", worker_message, "--model", args.model,
            "--dangerously-skip-permissions", "--output-format", "stream-json",
