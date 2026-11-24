@@ -79,82 +79,6 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 BROWSER_PREFIXES = ("browser_", "open_browser", "capture_browser", "click_browser", "read_browser",
                     "execute_browser", "list_browser")
 
-WORKER_MESSAGE = """\
-First read the spec with view_file: {spec}
-Implement it exactly as written. Touch only the files it names. Do not refactor, rename, or add anything it does not ask for.
-
-Honesty rules (the work will be inspected line by line, so shortcuts only cost everyone time):
-- Everything you build must really work. If a function, endpoint, feature, or (for UI) a button/form/link/toggle cannot be genuinely implemented, do NOT leave a stand-in or stub that pretends. Leave it out and list it under UNIMPLEMENTED.
-- No hardcoded/mock/placeholder data, fake loading timers, or "success" messages that are not backed by a real operation, unless the spec explicitly asks for mock data.
-- Do not open a browser, take screenshots, or generate images unless the spec asks you to.
-- Do not claim anything is tested or verified unless you ran it and saw the output. State only what you actually ran.
-- If the spec is ambiguous or contradicts the code, do not guess: stop and say so.
-
-When finished, reply with exactly these sections:
-FILES CHANGED: ...
-UNIMPLEMENTED / PARTIAL: ... (write "none" only if it is true)
-COMMANDS RUN: ... (the real ones, with pass/fail)
-DEVIATIONS FROM SPEC: ...
-"""
-
-WORKER_MESSAGE_HIGH = """\
-First read the plan with view_file: {spec}
-The plan states the goal, the architecture direction, and the constraints. You own everything else. Explore the codebase, design the details yourself (signatures, file structure, edge-case handling), and implement them following existing conventions. Do not refactor, rename, or add features beyond what the direction implies.
-
-Honesty rules (the work will be inspected line by line, so shortcuts only cost everyone time):
-- Everything you build must really work. If a function, endpoint, feature, or (for UI) a button/form/link/toggle cannot be genuinely implemented, do NOT leave a stand-in or stub that pretends. Leave it out and list it under UNIMPLEMENTED.
-- No hardcoded/mock/placeholder data, fake loading timers, or "success" messages that are not backed by a real operation, unless the plan explicitly asks for mock data.
-- Do not open a browser, take screenshots, or generate images unless the plan asks you to.
-- Do not claim anything is tested or verified unless you ran it and saw the output. State only what you actually ran.
-- If the plan is ambiguous or contradicts the code, do not guess: stop and say so.
-
-When finished, reply with exactly these sections:
-FILES CHANGED: ...
-UNIMPLEMENTED / PARTIAL: ... (write "none" only if it is true)
-COMMANDS RUN: ... (the real ones, with pass/fail)
-DEVIATIONS FROM PLAN: ...
-"""
-
-WORKER_MESSAGE_FULL = """\
-First read the direction brief with view_file: {spec}
-The brief states the goal and constraints agreed with the user. You own everything else — exploration, design, implementation, and how to verify. Work freely within the direction, follow existing conventions, and make your own calls on anything the brief does not settle.
-
-Honesty rules:
-- Everything you build must really work. If something cannot be genuinely implemented, leave it out and list it under UNIMPLEMENTED.
-- No hardcoded/mock/placeholder data or fake success messages, unless the brief explicitly asks for mock data.
-- Do not claim anything is tested or verified unless you ran it and saw the output.
-- If the brief contradicts the code in a way that changes the goal, stop and say so.
-
-When finished, reply with exactly these sections:
-FILES CHANGED: ...
-UNIMPLEMENTED / PARTIAL: ... (write "none" only if it is true)
-COMMANDS RUN: ... (the real ones, with pass/fail)
-SUMMARY: ... (what you built, in plain language the user can read)
-"""
-
-WORKER_MESSAGE_INVESTIGATE = """\
-First read the question with view_file: {spec}
-This is an investigation, not an implementation. Do NOT modify, create, or delete any file. No hardcoded experiments that leave artifacts behind. Explore the codebase and answer the question: find the root cause, gather evidence (exact file paths, line references, quotations from the code), and state your confidence and what is still uncertain. If you cannot determine the cause, say so and list what you ruled out.
-
-When finished, reply with exactly these sections:
-ROOT CAUSE: ... (your best answer, stated plainly)
-EVIDENCE: ... (file paths, line references, code quotations backing it)
-UNCERTAINTY: ... (what you could not determine, what you ruled out)
-"""
-
-
-WORKER_MESSAGE_RESUME = """\
-Your previous turn in this conversation stopped before you finished. It was cut off by an error or a time limit, not ended by you, so the task is still open.
-First read the follow-up note with view_file: {spec}
-It says what interrupted you and answers anything that was open. Continue the same task from where you left off under the same instructions and honesty rules as before. Check the current state of the files you were editing before changing them; do not redo finished work or re-explore what you already read.
-End with the same final sections the original instructions asked for, covering the whole task, not only this turn.
-"""
-
-NON_INTERACTIVE = """
-This run is non-interactive: nobody can answer questions or permission prompts, so never use ask_question or similar tools. Decide open points yourself, within the spec, and list those decisions in your final message.
-"""
-
-
 # Over-exploration guard. Workers left to "explore" tend to keep reading (often the source of
 # third-party libraries) instead of committing to a design: one run spent 30 minutes and 81 of
 # 117 tool calls inside external/imgui, edited nothing, then finished in 3 minutes once Claude
@@ -165,10 +89,6 @@ EXPLORE_LIMIT_MIN = {"default": 0, "high": 0, "full": 0}
 EDIT_TOOL = re.compile(r"edit|write|patch|replace|create|apply", re.I)
 THIRD_PARTY = re.compile(r"[\\/](external|extern|third[_-]?party|3rdparty|vendor|vendored|deps|node_modules|"
                          r"site-packages|\.cargo|pkg[\\/]mod)[\\/]", re.I)
-EXPLORE_RULES = """
-Explore with purpose: read the files the plan points to first, then only what the next decision needs. Stay inside this project's own code: do not read the source of third-party libraries or vendored dependencies (external/, third_party/, vendor/, node_modules/ ...); how this project already calls them, plus their headers, is enough. When unsure how a library behaves, use its standard documented usage, note the assumption, and check it by building or running, not by reading its internals. Start editing early: the plan's Start here / Decided lists are meant to make long reading unnecessary.
-"""
-EXPLORE_STOP = "If you have not changed any file after roughly {limit} minutes, the run is stopped.\n"
 
 
 def list_files(root: Path):
@@ -444,6 +364,7 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True, help="markdown spec/plan/brief file for the worker")
+    ap.add_argument("--prompt", required=True, help="fresh, short, natural request written for this run")
     ap.add_argument("--cwd", default=".", help="project directory the worker runs in")
     ap.add_argument("--model", default=None,
                     help="see `agy models`; default: auto-detected, flash family first, then the highest version, -high tier")
@@ -470,6 +391,8 @@ def main():
                     help="don't open the read-only live-view window")
     args = ap.parse_args()
 
+    if not args.prompt.strip():
+        ap.error("--prompt must not be empty")
     root = Path(args.cwd).resolve()
     spec = Path(args.spec).resolve()
     if not spec.is_file():
@@ -501,28 +424,25 @@ def main():
 
     if args.timeout is None:
         args.timeout = 3600   # 60 minutes for every level (user decision 2026-10-27); Claude inspects every 15
-    if args.level == "high":
-        worker_message = WORKER_MESSAGE_HIGH
-    elif args.level == "full":
-        worker_message = WORKER_MESSAGE_FULL
-    else:
-        worker_message = WORKER_MESSAGE
-    if args.mode == "investigate":
-        worker_message = WORKER_MESSAGE_INVESTIGATE
-    worker_message = worker_message.format(spec=spec_copy)
-    if args.session:
-        # Resuming: the conversation already holds the original spec and the work so far;
-        # the --spec file is the follow-up (what broke, answers to open questions).
-        worker_message = WORKER_MESSAGE_RESUME.format(spec=spec_copy)
-    worker_message += NON_INTERACTIVE
     if args.explore_limit is None:
         args.explore_limit = EXPLORE_LIMIT_MIN[args.level]
     if args.mode == "investigate":
-        args.explore_limit = 0  # reading is the whole job
+        args.explore_limit = 0
+
+    # Keep the operational contract out of the conversational prompt.
+    source = (Path(__file__).resolve().parent.parent / "references" / "worker-instructions.md").read_text(encoding="utf-8")
+    sections = dict(re.findall(r"<!-- (\w+) -->\s*([\s\S]*?)(?=<!-- \w+ -->|\Z)", source))
+    key = ("WORKER_MESSAGE_INVESTIGATE" if args.mode == "investigate" else
+           {"default": "WORKER_MESSAGE", "high": "WORKER_MESSAGE_HIGH", "full": "WORKER_MESSAGE_FULL"}[args.level])
+    instruction_text = sections["WORKER_MESSAGE_RESUME" if args.session else key].format(spec=spec_copy).strip()
+    instruction_text += "\n\n" + sections["NON_INTERACTIVE"].strip()
     if args.mode != "investigate":
-        worker_message += EXPLORE_RULES
+        instruction_text += "\n\n" + sections["EXPLORE_RULES"].strip()
     if args.explore_limit:
-        worker_message += EXPLORE_STOP.format(limit=f"{args.explore_limit:g}")
+        instruction_text += f"\n\nIf you have not changed any file after roughly {args.explore_limit:g} minutes, the run is stopped."
+    instruction_file = run_dir / "instructions.md"
+    instruction_file.write_text(instruction_text + "\n", encoding="utf-8")
+    worker_message = args.prompt.strip() + "\n\n" + str(instruction_file)
 
     cmd = [agy, "-p", worker_message, "--model", args.model,
            "--dangerously-skip-permissions", "--output-format", "stream-json",
@@ -555,11 +475,11 @@ def main():
     found = re.search(r'"conversation_id"\s*:\s*"([^"]+)"', raw)
     session = result.get("conversation_id") or (found.group(1) if found else None)
     resume_hint = (f"resume: if the worker was cut off (API error, timeout, stall, crash) rather than done, "
-                   f"continue it with --session {session} --spec <follow-up note> --cwd \"{root}\"")
+                   f"continue it with --session {session} --spec <follow-up note> --prompt <fresh-request> --cwd \"{root}\"")
     if outcome == "exploring":
         resume_hint = (f"resume: the worker kept reading instead of deciding. Look at what it was reading in "
                        f"live.log, make those decisions yourself in a short note (which API, which layout, "
-                       f"which approach), then --session {session} --spec <note> --cwd \"{root}\"")
+                       f"which approach), then --session {session} --spec <note> --prompt <fresh-request> --cwd \"{root}\"")
     (run_dir / "final.md").write_text(final or "(no final message)", encoding="utf-8")
     write_trace(run_dir / "trace.md", tools)
     result_status = result.get("status", "NO RESULT EVENT")

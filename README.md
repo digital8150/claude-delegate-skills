@@ -79,10 +79,10 @@ neither takes the task over nor starts a fresh run that has forgotten everything
 follow-up note and resumes **the same worker session**:
 
 ```bash
-python delegate.py --session <id-from-report> --spec followup.md --cwd <project>
+python delegate.py --session <id-from-report> --spec followup.md --prompt "<fresh natural continuation request>" --cwd <project>
 ```
 
-The report prints the session ID and a ready-made resume command whenever a run ends abnormally. It also
+The report prints the session ID and a resume command outline (write a fresh prompt for it) whenever a run ends abnormally. It also
 recognizes the case where the worker *finished* and the error only arrived after its final message, so
 nothing gets resumed needlessly.
 
